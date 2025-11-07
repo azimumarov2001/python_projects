@@ -1,0 +1,279 @@
+from fastapi import FastAPI, HTTPException, Depends
+from sqlalchemy.orm import Session, declarative_base, sessionmaker, relationship
+from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, Table
+from pydantic import BaseModel
+from typing import List, Optional
+
+DATABASE_URL = "sqlite:///database.db"
+engine = create_engine(DATABASE_URL, connect_args={'check_same_thread': False})
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+app = FastAPI()
+
+student_course = Table(
+    'student_course',
+    Base.metadata,
+    Column('student_id', Integer, ForeignKey('students.id'), primary_key=True),
+    Column('course_id', Integer, ForeignKey('courses.id'), primary_key=True)
+)
+
+# Промежуточная таблица Teacher ↔ Course
+teacher_course = Table(
+    'teacher_course',
+    Base.metadata,
+    Column('teacher_id', Integer, ForeignKey('teachers.id'), primary_key=True),
+    Column('course_id', Integer, ForeignKey('courses.id'), primary_key=True)
+)
+
+
+class Student(Base):
+    __tablename__ = 'students'
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+
+    # Связь многие-ко-многим с курсами
+    courses = relationship('Course', secondary=student_course, back_populates='students', cascade='all, delete-orphan')
+
+
+class Course(Base):
+    __tablename__ = 'courses'
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, nullable=False)
+
+    # Обратные связи
+    students = relationship('Student', secondary=student_course, back_populates='courses')
+    teachers = relationship('Teacher', secondary=teacher_course, back_populates='courses')
+
+
+class Teacher(Base):
+    __tablename__ = 'teachers'
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+
+    # Связь многие-ко-многим с курсами
+    courses = relationship('Course', secondary=teacher_course, back_populates='teachers', cascade='all, delete-orphan')
+
+
+class CreateStudent(BaseModel):
+    name: str
+
+
+class CreateCourse(BaseModel):
+    title: str
+
+
+class CreateTeacher(BaseModel):
+    name: str
+
+
+class StudentSimpleOut(BaseModel):
+    id: int
+    name: str
+
+    class Config:
+        orm_mode = True
+
+
+class CourseSimpleOut(BaseModel):
+    id: int
+    title: str
+
+    class Config:
+        orm_mode = True
+
+
+class TeacherSimpleOut(BaseModel):
+    id: int
+    name: str
+
+    class Config:
+        orm_mode = True
+
+
+class TeacherOut(BaseModel):
+    id: int
+    name: str
+    courses: List[CourseSimpleOut] = []
+
+    class Config:
+        orm_mode = True
+
+
+class CourseOut(BaseModel):
+    id: int
+    title: str
+    students: List[StudentSimpleOut] = []
+    teachers: List[TeacherSimpleOut] = []
+
+    class Config:
+        orm_mode = True
+
+
+class StudentOut(BaseModel):
+    id: int
+    name: str
+    courses: List[CourseSimpleOut] = []
+
+    class Config:
+        orm_mode = True
+
+
+class UpdateStudent(BaseModel):
+    name: Optional[str]
+
+
+class UpdateCourse(BaseModel):
+    title: Optional[str]
+
+
+class UpdateTeacher(BaseModel):
+    name: Optional[str]
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+Base.metadata.create_all(bind=engine)
+
+
+@app.get("/students", response_model=List[StudentSimpleOut])
+def get_students(db: Session = Depends(get_db)):
+    return db.query(Student).all()
+
+
+@app.post("/students", response_model=StudentSimpleOut)
+def create_student(student: CreateStudent, db: Session = Depends(get_db)):
+    if db.query(Student).filter(Student.name == student.name).first():
+        raise HTTPException(status_code=400, detail="Student already exists")
+    new_student = Student(name=student.name)
+    db.add(new_student)
+    db.commit()
+    db.refresh(new_student)
+    return new_student
+
+
+@app.put("/students/{student_id}", response_model=StudentSimpleOut)
+def update_student(student_id: int, student_update: UpdateStudent, db: Session = Depends(get_db)):
+    put_student = db.query(Student).filter(Student.id == student_id).first()
+    if not put_student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    if student_update.name is not None:
+        put_student.name = student_update.name
+    db.commit()
+    db.refresh(put_student)
+    return put_student
+
+
+@app.delete("/students/{student_id}")
+def delete_students(student_id: int, db: Session = Depends(get_db)):
+    delete_student = db.query(Student).filter(Student.id == student_id).first()
+    if not delete_student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    db.delete(delete_student)
+    db.commit()
+    return {'message': 'Student deleted'}
+
+
+@app.get("/courses", response_model=List[CourseSimpleOut])
+def get_courses(db: Session = Depends(get_db)):
+    return db.query(Course).all()
+
+
+@app.post("/courses", response_model=CourseSimpleOut)
+def create_course(course: CreateCourse, db: Session = Depends(get_db)):
+    if db.query(Course).filter(Course.title == course.title).first():
+        raise HTTPException(status_code=400, detail="Course already exists")
+    new_course = Course(title=course.title)
+    db.add(new_course)
+    db.commit()
+    db.refresh(new_course)
+    return new_course
+
+
+@app.put("/courses/{course_id}", response_model=CourseSimpleOut)
+def update_course(course_id: int, course_update: UpdateCourse, db: Session = Depends(get_db)):
+    put_course = db.query(Course).filter(Course.id == course_id).first()
+    if not put_course:
+        raise HTTPException(status_code=404, detail="Course not found")
+    if course_update.title is not None:
+        put_course.title = course_update.title
+    db.commit()
+    db.refresh(put_course)
+    return put_course
+
+
+@app.delete("/courses/{course_id}")
+def delete_courses(course_id: int, db: Session = Depends(get_db)):
+    delete_course = db.query(Course).filter(Course.id == course_id).first()
+    if not delete_course:
+        raise HTTPException(status_code=404, detail="Course not found")
+    db.delete(delete_course)
+    db.commit()
+    return {'message': 'Course deleted'}
+
+
+@app.get("/teachers", response_model=List[TeacherSimpleOut])
+def get_teachers(db: Session = Depends(get_db)):
+    return db.query(Teacher).all()
+
+
+@app.post("/teachers", response_model=TeacherSimpleOut)
+def create_teacher(teacher: CreateTeacher, db: Session = Depends(get_db)):
+    if db.query(Teacher).filter(Teacher.name == teacher.name).first():
+        raise HTTPException(status_code=400, detail="Teacher already exists")
+    new_teacher = Teacher(name=teacher.name)
+    db.add(new_teacher)
+    db.commit()
+    db.refresh(new_teacher)
+    return new_teacher
+
+
+@app.put("/teachers/{teacher_id}", response_model=TeacherSimpleOut)
+def update_teacher(teacher_id: int, teacher_update: UpdateTeacher, db: Session = Depends(get_db)):
+    put_teacher = db.query(Teacher).filter(Teacher.id == teacher_id).first()
+    if not put_teacher:
+        raise HTTPException(status_code=404, detail="Teacher not found")
+    if teacher_update.name is not None:
+        put_teacher.name = teacher_update.name
+    db.commit()
+    db.refresh(put_teacher)
+    return put_teacher
+
+
+@app.delete("/teachers/{teacher_id}")
+def delete_teachers(teacher_id: int, db: Session = Depends(get_db)):
+    delete_teacher = db.query(Teacher).filter(Teacher.id == teacher_id).first()
+    if not delete_teacher:
+        raise HTTPException(status_code=404, detail="Teacher not found")
+    db.delete(delete_teacher)
+    db.commit()
+    return {'message': 'Teacher deleted'}
+
+
+@app.get("/courses/{course_id}/teachers", response_model=List[TeacherSimpleOut])
+def read_courses_by_teachers(course_id: int, db: Session = Depends(get_db)):
+    new_course = db.query(Course).filter(Course.id == course_id).first()
+    if not new_course:
+        raise HTTPException(status_code=404, detail="Course not found")
+    return new_course.teachers
+
+
+@app.get('/courses/{course_id}/students', response_model=List[StudentSimpleOut])
+def read_courses_by_students(course_id: int, db: Session = Depends(get_db)):
+    new_course1 = db.query(Course).filter(Course.id == course_id).first()
+    if not new_course1:
+        raise HTTPException(status_code=404, detail="Course not found")
+    return new_course1.students
+
+
+@app.get('/students/{student_id}/courses', response_model=List[CourseSimpleOut])
+def read_courses_by_students1(student_id: int, db: Session = Depends(get_db)):
+    new_student = db.query(Student).filter(Student.id == student_id).first()
+    if not new_student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    return new_student.courses
