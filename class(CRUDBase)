@@ -16,7 +16,6 @@ student_course = Table(
     Column("course_id", Integer, ForeignKey("courses.id"), primary_key=True)
 )
 
-# Ассоциативная таблица для преподавателей и курсов
 teacher_course = Table(
     "teacher_course",
     Base.metadata,
@@ -25,7 +24,6 @@ teacher_course = Table(
 )
 
 
-# --- Основные таблицы ---
 class Student(Base):
     __tablename__ = "students"
     id = Column(Integer, primary_key=True, index=True)
@@ -40,7 +38,7 @@ class Course(Base):
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String, nullable=False)
 
-    # Связи many-to-many
+
     students = relationship("Student", secondary=student_course, back_populates="courses")
     teachers = relationship("Teacher", secondary=teacher_course, back_populates="courses")
 
@@ -50,7 +48,6 @@ class Teacher(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
 
-    # Связь many-to-many с курсами
     courses = relationship("Course", secondary=teacher_course, back_populates="teachers")
 
 
