@@ -1,0 +1,324 @@
+import os
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
+from passlib.context import CryptContext
+from jose import jwt, JWTError
+from datetime import datetime, timedelta
+from pydantic import BaseModel
+from typing import Optional, List, Generic, TypeVar, Type
+
+from sqlalchemy.orm import Session, declarative_base, sessionmaker, relationship
+from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, Table
+
+SECRET_KEY = os.environ.get("SECRET_KEY", "my_secret_key")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
+
+DATABASE_URL = "sqlite:///database.db"
+engine = create_engine(DATABASE_URL, connect_args={'check_same_thread': False})
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+app = FastAPI()
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
+ModelType = TypeVar("ModelType", bound=Base)
+CreateSchemaType = TypeVar("CreateSchemaType", bound=BaseModel)
+SimpleSchemaType = TypeVar("SimpleSchemaType", bound=BaseModel)
+OutSchemaType = TypeVar("OutSchemaType", bound=BaseModel)
+UpdateSchemaType = TypeVar("UpdateSchemaType", bound=BaseModel)
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def password_hash(password):
+    return pwd_context.hash(password)
+
+
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+def create_access_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def decode_token(token: str) -> dict:
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Token Error")
+
+
+user_course = Table(
+    "user_course",
+    Base.metadata,
+    Column("user_id", ForeignKey("users.id"), primary_key=True),
+    Column("course_id", ForeignKey("courses.id"), primary_key=True)
+)
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, nullable=False)
+    hashed_password = Column(String, nullable=False)
+    role = Column(String, default="user")
+
+    # Many-to-Many: пользователи ↔ курсы
+    courses = relationship(
+        "Course",
+        secondary="user_course",
+        back_populates="students"
+    )
+
+
+class Course(Base):
+    __tablename__ = "courses"
+
+    id = Column(Integer, primary_key=True)
+    title = Column(String, nullable=False)
+
+    # Many-to-Many: курсы ↔ пользователи
+    students = relationship(
+        "User",
+        secondary="user_course",
+        back_populates="courses"
+    )
+
+
+class CreateUser(BaseModel):
+    username: str
+    password: str
+
+
+class CreateCourse(BaseModel):
+    title: str
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str = 'Bearer'
+
+
+class UserSimpleOut(BaseModel):
+    id: int
+    username: str
+    role: str
+
+    class Config:
+        orm_mode = True
+
+
+class CourseSimpleOut(BaseModel):
+    id: int
+    title: str
+
+    class Config:
+        orm_mode = True
+
+
+class CourseOut(BaseModel):
+    id: int
+    title: str
+    students: List[UserSimpleOut] = []
+
+    class Config:
+        orm_mode = True
+
+
+class UserOut(BaseModel):
+    id: int
+    username: str
+    role: str
+    courses: List[CourseSimpleOut] = []
+
+    class Config:
+        orm_mode = True
+
+
+class UpdateUser(BaseModel):
+    username: Optional[str] = None
+    password: Optional[str] = None
+
+    class Config:
+        orm_mode = True
+
+
+class UpdateCourse(BaseModel):
+    title: Optional[str] = None
+
+    class Config:
+        orm_mode = True
+
+
+class CRUDBase(Generic[ModelType, CreateSchemaType, SimpleSchemaType, OutSchemaType, UpdateSchemaType]):
+    def __init__(self, model: Type[ModelType]):
+        self.model = model
+
+    def get_all(self, db: Session) -> List[ModelType]:
+        return db.query(self.model).all()
+
+    def get_one(self, db: Session, obj_id: int) -> ModelType:
+        return db.query(self.model).filter(self.model.id == obj_id).first()
+
+    def create(self, db: Session, obj_in: CreateSchemaType) -> ModelType:
+        db_obj = self.model(**obj_in.dict(exclude_unset=True))
+        db.add(db_obj)
+        db.commit()
+        db.refresh(db_obj)
+        return db_obj
+
+    def update(self, db: Session, db_obj: ModelType, obj_in: UpdateSchemaType) -> ModelType:
+        obj_data = obj_in.dict(exclude_unset=True)
+        for field, value in obj_data.items():
+            setattr(db_obj, field, value)
+        db.commit()
+        db.refresh(db_obj)
+        return db_obj
+
+    def remove(self, db: Session, obj_id: int):
+        obj = db.query(self.model).filter(self.model.id == obj_id).first()
+        if obj:
+            db.delete(obj)
+            db.commit()
+            return obj
+
+
+user_crud = CRUDBase(User)
+course_crud = CRUDBase(Course)
+Base.metadata.create_all(bind=engine)
+
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    payload = decode_token(token)
+    username = payload.get("sub")
+    if not username:
+        raise HTTPException(status_code=401, detail="Token Error")
+    user = db.query(User).filter(User.username == username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+
+def require_admin(current_user: User = Depends(get_current_user)):
+    if current_user.role != 'admin':
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return current_user
+
+
+@app.post('/register', response_model=UserOut)
+def register(user: CreateUser, db: Session = Depends(get_db)):
+    if db.query(User).filter(User.username == user.username).first():
+        raise HTTPException(status_code=400, detail="Username already exists")
+    hashed_password = password_hash(user.password)
+    new_user = User(username=user.username, hashed_password=hashed_password, role='user')
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return new_user
+
+
+@app.post('/login', response_model=Token)
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == form_data.username).first()
+    if not user or not verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(status_code=400, detail="Incorrect password")
+    access_token = create_access_token(data={"sub": user.username, 'role': user.role})
+    return {"access_token": access_token, "token_type": "Bearer"}
+
+
+@app.post('/courses', response_model=CourseOut)
+def create_course(course: CreateCourse, db: Session = Depends(get_db), _: User = Depends(require_admin)):
+    if db.query(Course).filter(Course.title == course.title).first():
+        raise HTTPException(status_code=400, detail="Course already exists")
+    return course_crud.create(db, course)
+
+
+@app.delete('/courses/{course_id}')
+def delete_courses(course_id: int, db: Session = Depends(get_db), _: User = Depends(require_admin)):
+    delete_user = course_crud.remove(db, course_id)
+    if not delete_user:
+        raise HTTPException(status_code=404, detail="Course not found")
+    return {'message': 'Course deleted'}
+
+
+@app.post('/courses/{course_id}/join', response_model=CourseOut)
+def add_student_to_course(course_id: int, db: Session = Depends(get_db),
+                          current_user: User = Depends(get_current_user)):
+    course = db.query(Course).filter(Course.id == course_id).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+    if course in current_user.courses:
+        raise HTTPException(status_code=400, detail="Student already exists")
+    current_user.courses.append(course)
+    db.commit()
+    db.refresh(course)
+    return course
+
+
+@app.delete('/courses/{course_id}/leave')
+def remove_student_from_course(course_id: int, db: Session = Depends(get_db),
+                               current_user: User = Depends(get_current_user)):
+    course = db.query(Course).filter(Course.id == course_id).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+    if course not in current_user.courses:
+        raise HTTPException(status_code=400, detail="You are not enrolled in this course")
+    current_user.courses.remove(course)
+    db.commit()
+    db.refresh(course)
+    return {'message': 'Course deleted'}
+
+
+@app.post('/courses/{course_id}/add-student/{user_id}', response_model=CourseOut)
+def admin_add_student(course_id: int, user_id: int, db: Session = Depends(get_db), _: User = Depends(require_admin)):
+    course = db.query(Course).filter(Course.id == course_id).first()
+    user = db.query(User).filter(User.id == user_id).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user in course.students:
+        raise HTTPException(status_code=400, detail="Already enrolled")
+    course.students.append(user)
+    db.commit()
+    db.refresh(course)
+    return course
+
+
+@app.delete('/courses/{course_id}/remove-student/{user_id}')
+def admin_delete_student(course_id: int, user_id: int, db: Session = Depends(get_db), _: User = Depends(require_admin)):
+    course = db.query(Course).filter(Course.id == course_id).first()
+    user = db.query(User).filter(User.id == user_id).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user not in course.students:
+        raise HTTPException(status_code=400, detail="Not enrolled")
+    course.students.remove(user)
+    db.commit()
+    db.refresh(course)
+    return {'message': 'Course deleted'}
+
+
+@app.get('/courses/{course_id}/students', response_model=List[UserSimpleOut])
+def get_all_students(course_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    course = db.query(Course).filter(Course.id == course_id).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+    if current_user.role != "admin" and current_user not in course.students:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return course.students
